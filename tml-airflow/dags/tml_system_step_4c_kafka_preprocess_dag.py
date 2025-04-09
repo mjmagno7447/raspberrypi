@@ -13,6 +13,7 @@ import time
 import random
 import base64
 import threading
+import shutil
 
 sys.dont_write_bytecode = True
 ######################################## USER CHOOSEN PARAMETERS ########################################
@@ -57,7 +58,8 @@ default_args = {
   'attackscorethresholdtopic': 'attacktopic',   # All attack score greater than attackscorethreshold will be streamed to this topic
   'patternscorethreshold': '0.6',   # Pattern score threshold i.e. '0.8'   
   'patternscorethresholdtopic': 'patterntopic',   # All pattern score greater thn patternscorethreshold will be streamed to this topic
-  'rtmsfoldername': 'rtms'
+  'rtmsfoldername': 'rtms',
+  'rtmsmaxwindows': '10000'
 }
 
 ######################################## DO NOT MODIFY BELOW #############################################
@@ -125,14 +127,15 @@ def processtransactiondata():
          attackscorethresholdtopic = default_args['attackscorethresholdtopic']  
          patternscorethreshold = default_args['patternscorethreshold']  
          patternscorethresholdtopic = default_args['patternscorethresholdtopic']  
-         
+         rtmsmaxwindows=default_args['rtmsmaxwindows']
+
          searchterms = str(base64.b64encode(searchterms.encode('utf-8')))
          try:
                 result=maadstml.viperpreprocessrtms(VIPERTOKEN,VIPERHOST,VIPERPORT,topic,producerid,offset,maxrows,enabletls,delay,brokerhost,
                                                   brokerport,microserviceid,topicid,rtmsstream,searchterms,rememberpastwindows,identifier,
                                                   preprocesstopic,patternwindowthreshold,array,saveasarray,rawdataoutput,
                                                   rtmsscorethreshold,rtmsscorethresholdtopic,attackscorethreshold,
-                                                  attackscorethresholdtopic,patternscorethreshold,patternscorethresholdtopic)
+                                                  attackscorethresholdtopic,patternscorethreshold,patternscorethresholdtopic,rtmsmaxwindows)
 #                print(result)
          except Exception as e:
                 print("ERROR:",e)
@@ -182,8 +185,9 @@ def ingestfiles():
     dirbuf = buf.split(",")
     if len(dirbuf) == 0:
        return
-      
+
     while True:  
+     try: 
       lg=""
       buf = default_args['localsearchtermfolder']
       interval=int(default_args['localsearchtermfolderinterval'])
@@ -219,12 +223,14 @@ def ingestfiles():
               # check regex
               for m in lines:
                 if len(m) > 0:
-                  if 'rgx:' in m:
+                  if 'rgx:' in m and m[:4]=="rgx:":
                     rgx.append(m)
-                  elif '~~~' in m:                  
+                  elif '~~~' in m and m[:3]=="~~~":                  
                     ibx.append(m)
                   else:  
-                    linebuf = linebuf + m + ","
+                    m=m.replace(",", " ")
+                    if m[0] != "~":
+                      linebuf = linebuf + m + ","
 
          if linebuf != "":
            linebuf = linebuf[:-1]
@@ -244,7 +250,11 @@ def ingestfiles():
         break
       else:  
        time.sleep(interval)
-                    
+     except Exception as e: 
+       print("ERROR: ingesting files:",e)
+       continue
+       
+      
 def startdirread():
   if 'localsearchtermfolder' not in default_args:
      return
@@ -383,14 +393,23 @@ def dopreprocessing(**context):
        else:
          fullpath="/{}/tml-airflow/dags/{}".format(repo,os.path.basename(__file__))  
 
-       rtmsmaxwindows
-       if 'step1rtmsmaxwindows' in os.environ:
-         default_args['RTMSMAXWINDOWS']=os.environ['step1rtmsmaxwindows']
+       if 'step4crtmsmaxwindows' in os.environ:
+          rtmsmaxwindows=os.environ['step4crtmsmaxwindows']
+          default_args['rtmsmaxwindows']=rtmsmaxwindows
+       else: 
+          rtmsmaxwindows = default_args['rtmsmaxwindows']
+       ti.xcom_push(key="{}_rtmsmaxwindows".format(sname), value="_{}".format(rtmsmaxwindows))         
+       try: 
+         f = open("/tmux/rtmsmax.txt", "w")
+         f.write(rtmsmaxwindows)
+         f.close()
+       except Exception as e:
+         pass
         
        wn = windowname('preprocess3',sname,sd)     
        subprocess.run(["tmux", "new", "-d", "-s", "{}".format(wn)])
        subprocess.run(["tmux", "send-keys", "-t", "{}".format(wn), "cd /Viper-preprocess3", "ENTER"])
-       subprocess.run(["tmux", "send-keys", "-t", "{}".format(wn), "python {} 1 {} {}{} {} {} \"{}\" {} {} \"{}\" \"{}\" {} {} {} \"{}\" {} \"{}\"".format(fullpath,VIPERTOKEN,HTTPADDR,VIPERHOST,VIPERPORT[1:],maxrows,searchterms,rememberpastwindows,patternwindowthreshold,raw_data_topic,rtmsstream,rtmsscorethreshold,attackscorethreshold,patternscorethreshold,localsearchtermfolder,localsearchtermfolderinterval,rtmsfoldername), "ENTER"])
+       subprocess.run(["tmux", "send-keys", "-t", "{}".format(wn), "python {} 1 {} {}{} {} {} \"{}\" {} {} \"{}\" \"{}\" {} {} {} \"{}\" {} \"{}\" {}".format(fullpath,VIPERTOKEN,HTTPADDR,VIPERHOST,VIPERPORT[1:],maxrows,searchterms,rememberpastwindows,patternwindowthreshold,raw_data_topic,rtmsstream,rtmsscorethreshold,attackscorethreshold,patternscorethreshold,localsearchtermfolder,localsearchtermfolderinterval,rtmsfoldername,rtmsmaxwindows), "ENTER"])
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
@@ -435,8 +454,15 @@ if __name__ == '__main__':
         default_args['localsearchtermfolderinterval'] = localsearchtermfolderinterval
         rtmsfoldername =  sys.argv[16]
         default_args['rtmsfoldername'] = rtmsfoldername
-        
+        rtmsmaxwindows =  sys.argv[17]
+        default_args['rtmsmaxwindows'] = rtmsmaxwindows
+
         tsslogging.locallogs("INFO", "STEP 4c: Preprocessing 3 started")
+        try:
+          shutil.rmtree("/rawdata/{}".format(rtmsfoldername),ignore_errors=True)
+        except Exception as e:
+           pass
+          
         try:
          directory="/rawdata/{}".format(rtmsfoldername)         
          if not os.path.exists(directory):
